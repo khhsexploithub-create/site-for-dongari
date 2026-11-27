@@ -8,7 +8,12 @@ import {
 
 import { auth, db } from "../firebase.js";
 import { resourceList } from "../resources/resourceList.js";
-import { getAutoApprovalItems, saveAutoApprovalItems } from "../resources/autoApproval.js";
+import {
+  formatAutoApproveAt,
+  getAutoApprovalItems,
+  saveAutoApprovalItems,
+  settleDueAutoApprovals
+} from "../resources/autoApproval.js";
 import {
   createInfoLine,
   createStatusBadge,
@@ -166,6 +171,11 @@ export async function loadResourceAdmin() {
       .map((reservationDoc) => ({ id: reservationDoc.id, ...reservationDoc.data() }))
       .sort(compareReservations);
 
+    // 접수 + 5분이 지난 자동승인 대기 신청을 승인으로 바꾼다.
+    if (await settleDueAutoApprovals(reservations) > 0) {
+      reservations.sort(compareReservations);
+    }
+
     renderStats();
     renderReservations();
   } catch (error) {
@@ -239,8 +249,14 @@ function createReservationCard(reservation) {
   purpose.classList.add("admin-card-message");
 
   const createdAt = createInfoLine("신청 시간", formatDateTime(reservation.createdAt));
+  // 자동승인 항목은 접수 + 5분에 승인된다. 그 전에 직접 승인 · 반려할 수도 있다.
+  const autoApproveAt = formatAutoApproveAt(reservation);
   const badge = createStatusBadge(
-    status === "approved" && reservation.autoApproved === true ? "자동 승인됨" : getStatusName(status),
+    status === "approved" && reservation.autoApproved === true
+      ? "자동 승인됨"
+      : autoApproveAt
+        ? `자동승인 예정 ${autoApproveAt}`
+        : getStatusName(status),
     status
   );
 

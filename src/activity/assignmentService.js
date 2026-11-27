@@ -57,6 +57,14 @@ export function isSubmittable(assignment, now = Date.now()) {
   return getAssignmentStatus(assignment, now) === ASSIGNMENT_STATUS.open.value;
 }
 
+// 낸 글을 고칠 수 있는지. 제출 기간 안이거나, '마감 후 수정 허용' 과제면 마감 뒤에도 된다.
+// firestore.rules 의 canEditSubmissionNow 와 같은 조건이다.
+export function isSubmissionEditable(assignment, now = Date.now()) {
+  const status = getAssignmentStatus(assignment, now);
+  if (status === ASSIGNMENT_STATUS.waiting.value) return false;
+  return status === ASSIGNMENT_STATUS.open.value || assignment?.allowLateEdit === true;
+}
+
 // 마감까지 남은 기간을 '13일', '5시간' 처럼 적어 준다.
 export function describeRemaining(assignment, now = Date.now()) {
   const dueAt = toMillis(assignment?.dueAt);
@@ -213,6 +221,27 @@ export async function createSubmission(assignmentId, {
   await batch.commit();
 
   return uid;
+}
+
+// 본인 글 수정. 제목 · 내용 · 첨부만 바꾸고, 글쓴이 · 조회수 · 등록일은 그대로 둔다.
+export async function updateSubmission(assignmentId, { title, content, attachments }) {
+  const uid = currentUid();
+  const cleanedAttachments = cleanAttachments(attachments);
+  const batch = writeBatch(db);
+
+  batch.update(submissionReference(assignmentId, uid), {
+    title: String(title ?? "").trim(),
+    attachmentCount: cleanedAttachments.length,
+    updatedAt: serverTimestamp()
+  });
+
+  batch.update(submissionDetailReference(assignmentId, uid), {
+    content: String(content ?? "").trim(),
+    attachments: cleanedAttachments,
+    updatedAt: serverTimestamp()
+  });
+
+  await batch.commit();
 }
 
 function submissionReference(assignmentId, userId) {

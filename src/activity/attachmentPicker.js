@@ -1,4 +1,4 @@
-// 과제 등록 · 수정 창의 첨부 칸.
+// 과제 등록 · 수정 창, 제출글 작성 · 수정 화면의 첨부 칸.
 // 이미 저장된 첨부(해제할 수 있다)와 새로 고르는 파일 칸을 한 목록에 보여주고,
 // 합쳐서 최대 10개, 파일 하나당 30MB 까지만 받는다.
 
@@ -177,6 +177,9 @@ export function createAttachmentPicker({ list, addButton, message }) {
   addButton.addEventListener("click", addFileRow);
 
   return {
+    // 빈 파일 칸을 하나 더한다. (처음 화면에 칸을 몇 개 깔아 둘 때)
+    addRow: addFileRow,
+
     // 창을 열 때마다 호출한다. attachments 는 이미 저장된 첨부(수정할 때만).
     reset(attachments = []) {
       clearList();

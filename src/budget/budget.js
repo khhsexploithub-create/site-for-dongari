@@ -11,6 +11,8 @@ import {
   createBudgetRequest,
   getRequestPasswordHash,
   hashRequestPassword,
+  isItemProcessed,
+  isPartiallyProcessed,
   readItems,
   sumApprovedAmount,
   subscribeToAllBudgetRequests,
@@ -487,7 +489,7 @@ function renderRecentBudgetRecords(budgetRequests) {
 
     const statusBadge = document.createElement("span");
     statusBadge.className = `budget-record-badge status-${budgetRequest.status ?? "approved"}`;
-    statusBadge.textContent = getStatusName(budgetRequest.status);
+    statusBadge.textContent = getRequestStatusName(budgetRequest);
 
     head.append(heading, statusBadge);
 
@@ -550,7 +552,7 @@ function renderMyBudgetRequests(budgetRequests) {
     const status = budgetRequest.status ?? "pending";
     const statusChip = document.createElement("span");
     statusChip.className = `nu-chip is-${status}`;
-    statusChip.textContent = getStatusName(status);
+    statusChip.textContent = getRequestStatusName(budgetRequest);
     heading.appendChild(statusChip);
 
     const itemBoxes = document.createElement("ul");
@@ -567,7 +569,9 @@ function renderMyBudgetRequests(budgetRequests) {
 
       const badge = document.createElement("span");
       badge.className = `review-status is-${itemStatus}`;
-      badge.textContent = ({ approved: "승인", rejected: "반려" })[itemStatus] ?? "대기";
+      badge.textContent = itemStatus === "approved" && isItemProcessed(entry)
+        ? "처리 완료"
+        : ({ approved: "승인", rejected: "반려" })[itemStatus] ?? "대기";
 
       const amount = document.createElement("span");
       amount.className = "budget-item-amount";
@@ -599,7 +603,7 @@ function renderMyBudgetRequests(budgetRequests) {
         : budgetRequest.meetingDate
           ? [createDetail("심의 회의", `${formatShortDate(budgetRequest.meetingDate)} 예산 소위원회`)]
           : []),
-      createDetail("처리 상태", getStatusName(budgetRequest.status)),
+      createDetail("처리 상태", getRequestStatusName(budgetRequest)),
       createDetail("관리자 의견", budgetRequest.adminMemo?.trim() || "등록된 의견이 없습니다.")
     );
 
@@ -621,6 +625,13 @@ function createDetail(label, value) {
   labelElement.textContent = `${label}: `;
   paragraph.append(labelElement, document.createTextNode(value));
   return paragraph;
+}
+
+// 연합회장 확인 뒤 일부 품목만 처리됐으면 '부분 처리 완료'로 보여 준다.
+function getRequestStatusName(budgetRequest) {
+  return isPartiallyProcessed(budgetRequest)
+    ? "부분 처리 완료"
+    : getStatusName(budgetRequest?.status);
 }
 
 function getStatusName(status) {

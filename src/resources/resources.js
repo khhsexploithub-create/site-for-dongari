@@ -14,7 +14,13 @@ import {
 } from "firebase/firestore";
 
 import { db } from "../firebase.js";
-import { getAutoApprovalItems, isAutoApprovalOn } from "./autoApproval.js";
+import {
+  formatAutoApproveAt,
+  getAutoApprovalItems,
+  isAutoApprovalOn,
+  msUntilNextAutoApproval,
+  settleDueAutoApprovals
+} from "./autoApproval.js";
 import {
   PRINTER_RESOURCE_NAME,
   PRINTER_TRAINING_MESSAGE,
@@ -290,15 +296,16 @@ reservationForm.addEventListener("submit", async (event) => {
       return;
     }
 
-    // 모든 항목은 관리자 승인 대기로 시작한다. 관리자가 그 항목의 자동승인을 켜 둔 경우에만
-    // 신청 즉시 승인된다. 설정은 신청할 때마다 새로 읽고, 보안 규칙도 같은 설정을 다시 확인한다.
+    // 모든 항목은 관리자 승인 대기로 시작한다. 관리자가 그 항목의 자동승인을 켜 둔 경우에는
+    // 신청(접수) 시각 + 5분에 자동으로 승인된다. 설정은 신청할 때마다 새로 읽고,
+    // 보안 규칙도 같은 설정과 5분을 다시 확인한다.
     const autoItems = await getAutoApprovalItems();
     let autoApproved = isAutoApprovalOn(autoItems, reservation.resourceName);
 
     try {
       await saveReservation(reservation, autoApproved);
     } catch (error) {
-      // 읽은 뒤에 관리자가 자동승인을 끈 경우 규칙이 승인 상태를 거절한다. 대기로 다시 신청한다.
+      // 읽은 뒤에 관리자가 자동승인을 끈 경우 규칙이 거절한다. 일반 대기로 다시 신청한다.
       if (!autoApproved || error?.code !== "permission-denied") throw error;
 
       autoApproved = false;
@@ -309,7 +316,7 @@ reservationForm.addEventListener("submit", async (event) => {
     populateResourceSelect();
     updateTrainingNotice();
     formMessage.textContent = autoApproved
-      ? "예약 신청이 자동으로 승인되었습니다."
+      ? "예약 신청이 접수되었습니다. 5분 뒤 자동으로 승인됩니다."
       : "예약 신청이 완료되었습니다. 관리자 승인 후 사용할 수 있습니다.";
     await loadReservations();
   } catch (error) {
@@ -322,14 +329,16 @@ reservationForm.addEventListener("submit", async (event) => {
   }
 });
 
-// 승인 상태는 여기서만 정한다. 자동승인이 아니면 언제나 대기(pending)이다.
-async function saveReservation(reservation, autoApproved) {
+// 신청은 언제나 대기(pending)로 저장한다.
+// 자동승인 항목이면 autoApproveScheduled 를 켜 두고, 접수 시각 + 5분에 승인으로 바뀐다.
+async function saveReservation(reservation, scheduleAutoApproval) {
   await addDoc(collection(db, RESERVATIONS_COLLECTION), {
     ...reservation,
-    status: autoApproved ? "approved" : "pending",
-    autoApproved,
+    status: "pending",
+    autoApproved: false,
+    autoApproveScheduled: scheduleAutoApproval === true,
     adminMemo: "",
-    reviewedAt: autoApproved ? serverTimestamp() : null,
+    reviewedAt: null,
     uid: currentUser.uid,
     createdAt: serverTimestamp()
   });
@@ -627,13 +636,28 @@ async function loadReservations() {
 
   try {
     reservations = await getReservations();
+    // 접수 + 5분이 지난 자동승인 대기 신청을 승인으로 바꾼다.
+    await settleDueAutoApprovals(reservations);
     renderReservations();
     renderMyReservations();
+    scheduleAutoApprovalRefresh();
   } catch (error) {
     console.error("예약 내역 조회 오류:", error);
     reservationList.textContent = "예약 내역을 불러오지 못했습니다.";
     myReservationList.textContent = "내 예약을 불러오지 못했습니다.";
   }
+}
+
+// 화면을 열어 둔 사이에 5분이 지나면 목록을 다시 읽어 승인 상태로 보여 준다.
+let autoApprovalTimer = 0;
+
+function scheduleAutoApprovalRefresh() {
+  window.clearTimeout(autoApprovalTimer);
+  const waitMs = msUntilNextAutoApproval(reservations);
+  if (waitMs < 0) return;
+
+  // 기기 시계와 서버 시계가 조금 어긋날 수 있어 몇 초 여유를 둔다.
+  autoApprovalTimer = window.setTimeout(loadReservations, waitMs + 3000);
 }
 
 async function getReservations() {
@@ -679,6 +703,10 @@ function renderReservationItems(listElement, items, emptyMessage, showCancelButt
     status.textContent = getStatusName(reservation.status);
     if (reservation.autoApproved === true && reservation.status === "approved") {
       status.textContent = "자동 승인됨";
+    }
+    const autoApproveAt = formatAutoApproveAt(reservation);
+    if (autoApproveAt) {
+      status.textContent = `자동승인 예정 ${autoApproveAt}`;
     }
     heading.append(title, status);
 
