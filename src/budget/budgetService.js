@@ -169,7 +169,44 @@ export function sumApprovedAmount(budgetRequest) {
 // 승인 이후의 흐름
 //   신청(pending) → 승인(approved · partial) → 연합회장 확인(confirmed) → 처리 → 처리 완료(completed)
 //   '처리'는 선생님이 실제로 구매하는 단계라 따로 저장하지 않는다. (연합회장 확인 뒤 처리 완료 전)
+//   [부분 처리 완료] 일부 품목만 먼저 산 경우 그 품목에 processed: true 를 남긴다.
+//   신청서 상태는 confirmed 그대로이고, 남은 품목까지 끝나면 completed 가 된다.
 // ========================================
+
+// 처리(구매)할 품목. 품목별 상태가 없던 옛 기록은 신청서가 승인됐으므로 모두 산다.
+export function getProcessTargets(budgetRequest) {
+  const items = readItems(budgetRequest);
+  const hasItemStatus = items.some((item) => item?.status);
+
+  return items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => !hasItemStatus || item?.status === "approved");
+}
+
+export function isItemProcessed(item) {
+  return item?.processed === true;
+}
+
+// 처리 진행 정도. 처리 완료(completed)면 모두 끝난 것으로 본다.
+export function getProcessProgress(budgetRequest) {
+  const targets = getProcessTargets(budgetRequest);
+  const isCompleted = budgetRequest?.status === "completed";
+  const processed = targets.filter(({ item }) => isCompleted || isItemProcessed(item));
+
+  return {
+    total: targets.length,
+    done: processed.length,
+    doneAmount: processed.reduce((sum, { item }) => sum + (Number(item.amount) || 0), 0),
+    remaining: targets.filter(({ item }) => !isCompleted && !isItemProcessed(item))
+  };
+}
+
+// 연합회장 확인 뒤 일부 품목만 처리된 상태
+export function isPartiallyProcessed(budgetRequest) {
+  if (budgetRequest?.status !== "confirmed") return false;
+  const { done, total } = getProcessProgress(budgetRequest);
+  return done > 0 && done < total;
+}
 
 // 승인 예산에 들어가는 신청서 상태. 반려 · 대기 · 본 회의 안건은 빠진다.
 export const APPROVED_FLOW_STATUSES = ["approved", "partial", "confirmed", "completed"];
@@ -212,8 +249,9 @@ export function summarizeBudget(budgetRequests) {
     awaitingConfirmCount: 0,
     confirmed: 0,          // 연합회장 확인 완료 · 처리 대기 금액
     confirmedCount: 0,
-    completedTotal: 0,     // 처리 완료 예산
+    completedTotal: 0,     // 처리 완료 예산 (부분 처리 완료된 품목 금액 포함)
     completedCount: 0,
+    partialCount: 0,       // 부분 처리 완료 신청서
     rejectedCount: 0       // 반려된 신청서 (집계 제외)
   };
 
@@ -232,8 +270,12 @@ export function summarizeBudget(budgetRequests) {
       summary.completedTotal += amount;
       summary.completedCount += 1;
     } else if (status === "confirmed") {
-      summary.confirmed += amount;
+      // 부분 처리 완료된 품목 금액은 처리 완료 예산으로, 나머지는 처리 대기로 센다.
+      const processedAmount = Math.min(getProcessProgress(budgetRequest).doneAmount, amount);
+      summary.completedTotal += processedAmount;
+      summary.confirmed += amount - processedAmount;
       summary.confirmedCount += 1;
+      if (processedAmount > 0) summary.partialCount += 1;
     } else {
       summary.awaitingConfirm += amount;
       summary.awaitingConfirmCount += 1;
@@ -253,6 +295,29 @@ export async function confirmBudgetByPresident(requestId, confirmerName = "") {
     presidentConfirmedBy: auth.currentUser?.uid ?? "",
     presidentConfirmedByName: String(confirmerName ?? "").slice(0, 40)
   });
+}
+
+// [부분 처리 완료] 고른 품목에 처리 표시를 남긴다. 신청서 상태는 연합회장 확인(confirmed) 그대로다.
+// 규칙(firestore.rules)은 심사를 시작한 예산 소위원장 · 관리자만 허용한다.
+export async function markItemsProcessed(requestId, items, indexes, adminMemo = "", reviewerName = "") {
+  const selected = new Set(indexes);
+  const processedAt = Date.now();
+  const nextItems = (items ?? []).map((item, index) => (
+    selected.has(index) && !isItemProcessed(item)
+      ? { ...item, processed: true, processedAt }
+      : item
+  ));
+
+  await updateDoc(doc(db, "budgetRequests", requestId), {
+    items: nextItems,
+    status: "confirmed",
+    adminMemo: String(adminMemo ?? "").trim(),
+    reviewedAt: serverTimestamp(),
+    reviewedBy: auth.currentUser?.uid ?? "",
+    reviewedByName: String(reviewerName ?? "").slice(0, 40)
+  });
+
+  return nextItems;
 }
 
 // 관리자 화면에서 품목 상태를 바꾼다. 누가 처리했는지 함께 남긴다.

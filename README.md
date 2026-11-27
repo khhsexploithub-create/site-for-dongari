@@ -58,6 +58,15 @@ src/
 - **자동승인**: 관리자 화면 → 자원 예약 관리 → '신청 항목별 자동승인'. `settings/reservationAutoApproval`
   문서에 켜진 항목만 담긴다. 문서가 없거나 꺼져 있으면 모든 신청은 승인 대기이고, 규칙이 같은 설정을
   다시 확인하므로 클라이언트가 `approved` 로 만들어 보낼 수 없다.
+  자동승인 항목 신청은 '승인 대기 + `autoApproveScheduled`'로 저장되고 **접수 시각 + 5분**에 승인된다.
+  (그 사이 소위원장이 직접 승인 · 반려 가능) 예약 · 관리자 화면을 연 브라우저와 Cloud Functions
+  `autoApproveReservations`(1분마다)가 승인으로 바꾸며, 규칙이 서버 시각으로 5분 경과를 확인한다.
+  함수는 `npx firebase-tools deploy --only functions` 로 따로 배포해야 한다.
+- **부분 처리 완료**: 연합회장 확인을 마친 예산 신청에서 일부 품목만 구매했을 때 [부분 처리 완료]로
+  그 품목에 `processed: true` 를 남긴다. 신청서 상태는 `confirmed` 그대로이고, 처리된 품목 금액은
+  [처리 완료 예산]에 더해진다. 남은 품목까지 끝나면 [처리 완료]로 `completed` 가 된다.
+- **제출글 수정**: 본인 제출글은 제출 기간 안에서 고칠 수 있다. 과제가 '마감 후 수정 허용'이면 마감 뒤에도 된다.
+  (`/activity/submit/<과제 번호>?edit=1`, 규칙의 `canEditSubmissionNow`)
 - **정렬**: `src/ui/listSort.js`. 과제 · 공지 · 제출 목록 모두 기본 최신순이고, 고른 방식은 브라우저에 저장된다.
 - 저장소 규칙은 `firebase deploy --only storage --config firebase.firestore.json` 으로 배포한다.
   (GitHub Actions 의 `Deploy Firestore rules` 워크플로가 `main` 푸시 때 같이 배포한다.)

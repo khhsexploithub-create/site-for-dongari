@@ -10,6 +10,7 @@ import {
   getSubmission,
   getSubmissionDetail,
   isAssignmentManager,
+  isSubmissionEditable,
   registerSubmissionView
 } from "./assignmentService.js";
 import { formatFileSize, removeAttachments } from "./attachmentUpload.js";
@@ -28,6 +29,9 @@ const postContent = document.querySelector("#submissionPostContent");
 const attachmentSection = document.querySelector("#submissionAttachments");
 const attachmentList = document.querySelector("#submissionAttachmentList");
 const deleteButton = document.querySelector("#submissionDeleteButton");
+const editLink = document.querySelector("#submissionEditLink");
+const postUpdatedWrap = document.querySelector("#submissionPostUpdatedWrap");
+const postUpdated = document.querySelector("#submissionPostUpdated");
 
 let submission = null;
 let assignment = null;
@@ -128,6 +132,8 @@ function renderSubmission(detail, canReadDetail) {
   postAuthor.textContent = submission.authorName || "이름 없음";
   postViews.textContent = formatViewCount(submission.viewCount);
   postDate.textContent = formatDateTime(submission.createdAt);
+  postUpdatedWrap.hidden = !submission.updatedAt;
+  postUpdated.textContent = submission.updatedAt ? formatDateTime(submission.updatedAt) : "";
 
   if (canReadDetail) {
     postContent.textContent = detail?.content ?? "";
@@ -141,6 +147,13 @@ function renderSubmission(detail, canReadDetail) {
 
   // 본인이 낸 글과 담당자, 관리자만 지울 수 있다.
   deleteButton.hidden = !(canOpenAll || submissionId === currentUser?.uid);
+
+  // 본인 글은 제출 기간 안(또는 '마감 후 수정 허용' 과제)에서 고칠 수 있다.
+  const canEdit = submissionId === currentUser?.uid && isSubmissionEditable(assignment);
+  editLink.hidden = !canEdit;
+  if (canEdit) {
+    editLink.href = `/activity/submit/${encodeURIComponent(assignmentId)}?edit=1`;
+  }
 
   article.hidden = false;
   stateMessage.hidden = true;

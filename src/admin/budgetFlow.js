@@ -7,10 +7,15 @@
 //  - createFlowStepper    : 카드마다 지금 어느 단계인지 보여 주는 진행 표시
 //  - openActionDialog     : 처리 전에 한 번 더 확인하는 창
 //  - openProcessDialog    : [처리] — 승인된 품목의 구매 링크 목록
+//  - openPartialCompleteDialog : [부분 처리 완료] — 처리를 마친 품목 고르기
 //  - createFlowButton · runButtonTask : 누르는 느낌이 있는 단추와 진행 상태 표시
 
 import { formatMoney } from "../budget/requestSheet.js";
-import { readItems, summarizeBudget } from "../budget/budgetService.js";
+import {
+  getProcessTargets,
+  isItemProcessed,
+  summarizeBudget
+} from "../budget/budgetService.js";
 import { withProtocol } from "./budgetReview.js";
 
 const prefersReducedMotion = () =>
@@ -187,17 +192,18 @@ function getFlowPosition(status) {
   }
 }
 
-function getStepLabel(index, status) {
+function getStepLabel(index, status, partial = false) {
   if (index === 1) {
     if (status === "partial") return "부분 승인";
     if (status === "rejected") return "반려";
     if (status === "assembly") return "본 회의 안건";
   }
-  if (index === 3 && status === "confirmed") return "처리 중";
+  if (index === 3 && status === "confirmed") return partial ? "부분 처리 완료" : "처리 중";
   return FLOW_STEPS[index];
 }
 
-export function createFlowStepper(status) {
+// partial: 연합회장 확인 뒤 일부 품목만 처리 완료된 상태
+export function createFlowStepper(status, { partial: initialPartial = false } = {}) {
   const list = el("ol", "flow-stepper");
   list.setAttribute("aria-label", "처리 단계");
 
@@ -209,9 +215,13 @@ export function createFlowStepper(status) {
     list.appendChild(step);
   });
 
-  function setStatus(nextStatus, { animate = false } = {}) {
+  let partial = initialPartial;
+
+  function setStatus(nextStatus, { animate = false, partial: nextPartial = partial } = {}) {
+    partial = nextPartial === true;
     const { done, current, tone } = getFlowPosition(nextStatus);
     list.dataset.tone = tone;
+    list.classList.toggle("is-partial", nextStatus === "confirmed" && partial);
 
     [...list.children].forEach((step, index) => {
       const wasDone = step.classList.contains("is-done");
@@ -221,7 +231,7 @@ export function createFlowStepper(status) {
       step.classList.toggle("is-done", isDone);
       step.classList.toggle("is-current", isCurrent);
       step.classList.toggle("is-just-done", animate && isDone && !wasDone);
-      step.querySelector(".flow-label").textContent = getStepLabel(index, nextStatus);
+      step.querySelector(".flow-label").textContent = getStepLabel(index, nextStatus, partial);
       step.querySelector(".flow-dot").textContent = isDone ? "✓" : String(index + 1);
 
       if (isCurrent) step.setAttribute("aria-current", "step");
@@ -291,12 +301,13 @@ export async function runButtonTask(button, task, { busyText = "처리 중", don
   setButtonLabel(button, busyText);
 
   try {
-    await task();
+    const result = await task();
     button.classList.remove("is-busy");
     button.classList.add("is-success");
     setButtonLabel(button, doneText);
     button.querySelector(".flow-btn-icon")?.replaceWith(icon("complete"));
     burst(button);
+    return result;
   } catch (error) {
     button.classList.remove("is-busy");
     button.classList.add("is-error");
@@ -397,12 +408,8 @@ export function openActionDialog({
 // ========================================
 
 export function openProcessDialog(budgetRequest) {
-  const items = readItems(budgetRequest);
   // 품목별 상태가 없던 옛 기록은 신청서가 승인됐으므로 모두 산다.
-  const hasItemStatus = items.some((item) => item.status);
-  const targets = items
-    .map((item, index) => ({ item, index }))
-    .filter(({ item }) => !hasItemStatus || item.status === "approved");
+  const targets = getProcessTargets(budgetRequest);
 
   const dialog = el("dialog", "flow-dialog flow-process-dialog is-process");
   const body = el("div", "flow-dialog-body");
@@ -443,6 +450,9 @@ export function openProcessDialog(budgetRequest) {
     const text = el("span", "flow-link-text");
     const label = item.isShipping && !name.includes("배송") ? `배송비 · ${name}` : name;
     text.append(el("strong", "", label), el("small", "", meta));
+    if (isItemProcessed(item)) {
+      text.appendChild(el("em", "flow-link-done", "처리 완료"));
+    }
 
     if (item.purchaseLink) {
       const link = el("a", "flow-link");
@@ -496,4 +506,110 @@ export function openProcessDialog(budgetRequest) {
   } else {
     dialog.setAttribute("open", "");
   }
+}
+
+// ========================================
+// [부분 처리 완료] — 처리를 마친 품목 고르기
+// ========================================
+// 고른 품목 번호(readItems 기준) 목록을 돌려준다. 취소하면 null.
+
+export function openPartialCompleteDialog(budgetRequest, { note = "" } = {}) {
+  const remaining = getProcessTargets(budgetRequest)
+    .filter(({ item }) => !isItemProcessed(item));
+  const doneCount = getProcessTargets(budgetRequest).length - remaining.length;
+
+  const dialog = el("dialog", "flow-dialog flow-partial-dialog is-complete");
+
+  if (typeof dialog.showModal !== "function") {
+    return Promise.resolve(null);
+  }
+
+  const form = el("form", "flow-dialog-body");
+  form.method = "dialog";
+
+  const badge = el("span", "flow-dialog-icon");
+  badge.appendChild(icon("complete"));
+
+  const heading = el("h3", "flow-dialog-title", "부분 처리 완료");
+  const desc = el(
+    "p",
+    "flow-dialog-desc",
+    `구매를 마친 품목만 골라주세요. 고른 품목 금액이 [처리 완료 예산]에 더해지고, 남은 품목은 계속 처리 대기로 남아요.`
+      + (doneCount > 0 ? ` (이미 처리 완료 ${doneCount}건)` : "")
+  );
+
+  const list = el("ol", "flow-link-list flow-partial-list");
+  const checkboxes = [];
+  let order = 0;
+
+  remaining.forEach(({ item, index }) => {
+    const row = el("li", "flow-link-row");
+    const label = el("label", "flow-link flow-partial-option");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = String(index);
+    checkbox.className = "flow-partial-check";
+
+    const name = item.itemName || "물품 이름 없음";
+    if (!item.isShipping) order += 1;
+    const text = el("span", "flow-link-text");
+    text.append(
+      el("strong", "", item.isShipping && !name.includes("배송") ? `배송비 · ${name}` : name),
+      el("small", "", `${formatMoney(item.quantity)}개 × ${formatMoney(item.unitPrice)}원 = ${formatMoney(item.amount)}원`)
+    );
+
+    label.append(el("span", "flow-link-no", item.isShipping ? "↳" : String(order)), text, checkbox);
+    row.appendChild(label);
+    list.appendChild(row);
+    checkboxes.push({ checkbox, item });
+  });
+
+  const total = el("p", "flow-link-progress");
+  const actions = el("div", "flow-dialog-actions");
+  const cancel = createFlowButton({ label: "취소", variant: "ghost", iconName: "reject" });
+  cancel.value = "cancel";
+  cancel.type = "submit";
+  const confirm = createFlowButton({ label: "선택 품목 처리 완료", variant: "complete" });
+  confirm.value = "confirm";
+  confirm.type = "submit";
+  actions.append(cancel, confirm);
+
+  function renderTotal() {
+    const chosen = checkboxes.filter(({ checkbox }) => checkbox.checked);
+    const amount = chosen.reduce((sum, { item }) => sum + (Number(item.amount) || 0), 0);
+    total.textContent = chosen.length > 0
+      ? `선택 ${chosen.length} / ${checkboxes.length}건 · ${formatMoney(amount)}원`
+        + (chosen.length === checkboxes.length ? " — 모두 고르면 [처리 완료]로 바뀌어요." : "")
+      : "처리를 마친 품목을 하나 이상 골라주세요.";
+    confirm.disabled = chosen.length === 0;
+    checkboxes.forEach(({ checkbox }) => {
+      checkbox.closest(".flow-link").classList.toggle("is-opened", checkbox.checked);
+    });
+  }
+
+  checkboxes.forEach(({ checkbox }) => checkbox.addEventListener("change", renderTotal));
+  renderTotal();
+
+  form.append(badge, heading, desc, list, total);
+  if (note) form.appendChild(el("p", "flow-dialog-note", note));
+  form.appendChild(actions);
+  dialog.appendChild(form);
+  document.body.appendChild(dialog);
+
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => {
+      const picked = checkboxes
+        .filter(({ checkbox }) => checkbox.checked)
+        .map(({ checkbox }) => Number(checkbox.value));
+      resolve(dialog.returnValue === "confirm" && picked.length > 0 ? picked : null);
+      dialog.classList.add("is-closing");
+      setTimeout(() => dialog.remove(), 200);
+    }, { once: true });
+
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) dialog.close("cancel");
+    });
+
+    dialog.showModal();
+  });
 }

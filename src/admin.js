@@ -31,7 +31,10 @@ import { createClubTag } from "./clubList.js";
 import {
   CONFIRMABLE_STATUSES,
   confirmBudgetByPresident,
+  getProcessProgress,
   getRequestPasswordHash,
+  isPartiallyProcessed,
+  markItemsProcessed,
   readItems,
   saveRequestPassword,
   subscribeToAllBudgetRequests,
@@ -43,6 +46,7 @@ import {
   createFlowButton,
   createFlowStepper,
   openActionDialog,
+  openPartialCompleteDialog,
   openProcessDialog,
   runButtonTask,
   wait
@@ -1070,7 +1074,8 @@ function createBudgetRequestCard(data) {
 
 
   // --- 진행 단계 (신청 → 승인 → 연합회장 확인 → 처리 → 처리 완료) ---
-  const stepper = createFlowStepper(status);
+  // 일부 품목만 처리 완료되면 '처리' 단계가 '부분 처리 완료'로 보인다.
+  const stepper = createFlowStepper(status, { partial: isPartiallyProcessed(data) });
 
 
   // --- [연합회장 확인] (전체 승인 · 전체 반려 옆) ---
@@ -1244,9 +1249,23 @@ function createBudgetRequestCard(data) {
     noteTitle.textContent = "선생님이 처리 후 눌러주세요";
 
     const noteText = document.createElement("span");
-    noteText.textContent = "[처리]에서 품목별 구매 링크를 열고, 구매를 마치면 [처리 완료]를 눌러요.";
+    noteText.textContent = "[처리]에서 품목별 구매 링크를 열고, 구매를 마치면 [처리 완료]를 눌러요."
+      + " 일부 품목만 샀다면 [부분 처리 완료]로 그 품목만 표시할 수 있어요.";
 
-    processNote.append(noteTitle, noteText);
+    // 부분 처리 완료 진행 정도
+    const progressText = document.createElement("p");
+    progressText.className = "flow-process-progress";
+
+    function renderProgress() {
+      const progress = getProcessProgress(data);
+      progressText.hidden = progress.done === 0;
+      progressText.textContent =
+        `부분 처리 완료 ${progress.done} / ${progress.total}건 · ${formatAmount(progress.doneAmount)}`;
+      return progress;
+    }
+
+    renderProgress();
+    processNote.append(noteTitle, noteText, progressText);
 
     const processActions = document.createElement("div");
     processActions.className = "flow-process-actions";
@@ -1309,6 +1328,62 @@ function createBudgetRequestCard(data) {
       });
 
       processActions.appendChild(completeButton);
+
+      // --- [부분 처리 완료] 일부 품목만 처리했을 때 (남은 품목이 2건 이상일 때만 의미가 있다) ---
+      const partialButton = createFlowButton({
+        label: "부분 처리 완료",
+        variant: "partial",
+        iconName: "complete"
+      });
+
+      const syncPartialButton = () => {
+        partialButton.hidden = renderProgress().remaining.length < 2;
+      };
+      syncPartialButton();
+
+      partialButton.addEventListener("click", async () => {
+
+        const picked = await openPartialCompleteDialog(data, {
+          note: adminMemo.value.trim() ? `의견: ${adminMemo.value.trim()}` : ""
+        });
+
+        if (!picked) return;
+
+        // 남은 품목을 모두 골랐으면 그냥 [처리 완료]와 같다.
+        if (picked.length >= getProcessProgress(data).remaining.length) {
+          completeButton.click();
+          return;
+        }
+
+        const release = holdBudgetListRender();
+
+        try {
+
+          const nextItems = await runButtonTask(
+            partialButton,
+            () => markItemsProcessed(data.id, readItems(data), picked, adminMemo.value, reviewer.name),
+            { busyText: "반영 중", doneText: "부분 처리 완료!" }
+          );
+
+          data.items = nextItems;
+          memoDrafts.delete(data.id);
+          stepper.setStatus("confirmed", { animate: true, partial: true });
+          syncPartialButton();
+          await wait(1100);
+
+        } catch (error) {
+
+          await handleBudgetWriteError(error, "부분 처리 완료 중 오류가 발생했습니다.");
+
+        } finally {
+
+          release();
+
+        }
+
+      });
+
+      processActions.appendChild(partialButton);
 
     } else {
 

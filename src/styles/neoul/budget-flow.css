@@ -1011,3 +1011,44 @@ a.flow-link .flow-link-text strong { color: var(--flow-indigo-2); text-decoratio
   .nu .flow-dialog-body { padding: 22px 18px 18px; }
   .nu .flow-dialog-actions .flow-btn { flex: 1; min-width: 0; }
 }
+
+/* ---------- 부분 처리 완료 ---------- */
+
+.nu .flow-btn.is-partial {
+  --btn-1: #ffffff;
+  --btn-2: #eaf8f5;
+  --btn-edge: #bfe8e0;
+  --btn-ink: var(--flow-teal-2);
+  --btn-glow: rgba(11, 111, 102, 0.35);
+}
+
+.nu .flow-process-progress {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--flow-teal-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.nu .flow-partial-option {
+  cursor: pointer;
+}
+
+.nu .flow-partial-check {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--flow-teal-2);
+  cursor: pointer;
+}
+
+.nu .flow-link-done {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #dff5f1;
+  color: var(--flow-teal-2);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}

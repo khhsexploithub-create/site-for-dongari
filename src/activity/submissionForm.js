@@ -12,23 +12,25 @@ import {
   getAssignmentClubName,
   getAssignmentStatusName,
   getMySubmission,
-  isSubmittable
+  getSubmissionDetail,
+  isSubmissionEditable,
+  isSubmittable,
+  updateSubmission
 } from "./assignmentService.js";
 import {
-  MAX_FILE_BYTES,
-  MAX_FILE_COUNT,
   createUploadId,
-  findOversizedFile,
-  formatFileSize,
   removeAttachments,
-  uploadAttachments
+  uploadAttachments,
+  validateAttachmentFiles
 } from "./attachmentUpload.js";
+import { createAttachmentPicker } from "./attachmentPicker.js";
 
 const form = document.querySelector("#submitForm");
 const stateMessage = document.querySelector("#submitStateMessage");
 const backLink = document.querySelector("#submitBackLink");
 const cancelLink = document.querySelector("#submitCancelLink");
 
+const headingKind = document.querySelector("#submitHeadingKind");
 const assignmentTitleTag = document.querySelector("#submitAssignmentTitle");
 const statusBadge = document.querySelector("#submitStatusBadge");
 const periodText = document.querySelector("#submitPeriodText");
@@ -40,11 +42,15 @@ const titleInput = document.querySelector("#submitTitle");
 const contentInput = document.querySelector("#submitContent");
 const contentCount = document.querySelector("#submitContentCount");
 
-const attachmentList = document.querySelector("#submitAttachmentList");
-const addAttachmentButton = document.querySelector("#submitAddAttachmentButton");
-
 const saveButton = document.querySelector("#submitSaveButton");
 const message = document.querySelector("#submitMessage");
+
+// 기존 첨부(수정할 때)와 새 파일 칸을 한 목록에서 다룬다. 합쳐서 10개, 파일당 30MB.
+const attachmentPicker = createAttachmentPicker({
+  list: document.querySelector("#submitAttachmentList"),
+  addButton: document.querySelector("#submitAddAttachmentButton"),
+  message
+});
 
 const INITIAL_ATTACHMENT_ROWS = 5;
 
@@ -53,11 +59,15 @@ let currentUser = null;
 let currentProfile = null;
 let isSaving = false;
 
+// 수정할 때만 채워진다. 저장되어 있던 첨부 목록.
+let originalAttachments = [];
+
 // ========================================
 // 주소 읽기
 // ========================================
 // /activity/submit/<과제 번호> 를 쓰고,
 // 재작성 규칙이 없는 환경에서는 ?id=<과제 번호> 로도 들어올 수 있게 한다.
+// 낸 글을 고칠 때는 주소 뒤에 ?edit=1 을 붙인다.
 
 function readAssignmentId() {
   const pathMatch = window.location.pathname.match(/^\/activity\/submit\/([^/]+)\/?$/);
@@ -70,6 +80,7 @@ function readAssignmentId() {
 }
 
 const assignmentId = readAssignmentId();
+const isEditMode = new URLSearchParams(window.location.search).get("edit") === "1";
 const assignmentUrl = assignmentId
   ? `/activity/assignment/${encodeURIComponent(assignmentId)}`
   : "/activity.html";
@@ -85,6 +96,10 @@ guardPage({
     await loadAssignment();
   }
 });
+
+function submissionUrl() {
+  return `/activity/submission/${encodeURIComponent(assignmentId)}/${encodeURIComponent(currentUser.uid)}`;
+}
 
 async function loadAssignment() {
   if (!assignmentId) {
@@ -109,16 +124,40 @@ async function loadAssignment() {
       return;
     }
 
-    if (!isSubmittable(assignment)) {
-      showStateMessage("제출 기간이 아닙니다. 과제 화면에서 기간을 확인해주세요.");
+    // 계정당 한 번만 낼 수 있다. 이미 냈으면 그 글을 고친다.
+    const mine = await getMySubmission(assignmentId, currentUser.uid).catch(() => null);
+
+    if (isEditMode) {
+      if (!mine) {
+        showStateMessage("고칠 제출글이 없습니다. 과제 화면에서 먼저 제출해주세요.");
+        return;
+      }
+
+      if (!isSubmissionEditable(assignment)) {
+        showStateMessage("제출 기간이 끝나 글을 고칠 수 없습니다. (이 과제는 마감 후 수정을 허용하지 않습니다)");
+        return;
+      }
+
+      const detail = await getSubmissionDetail(assignmentId, currentUser.uid).catch(() => null);
+      renderForm({ submission: mine, detail });
       return;
     }
 
-    // 계정당 한 번만 낼 수 있다.
-    const mine = await getMySubmission(assignmentId, currentUser.uid).catch(() => null);
-
     if (mine) {
-      showStateMessage("이미 제출한 과제입니다. 다시 내려면 낸 글을 지우고 새로 써주세요.");
+      if (isSubmissionEditable(assignment)) {
+        // 이미 냈으면 새로 쓰는 대신 낸 글을 고치는 화면으로 보낸다.
+        const editUrl = new URL(window.location.href);
+        editUrl.searchParams.set("edit", "1");
+        window.location.replace(editUrl.toString());
+        return;
+      }
+
+      showStateMessage("이미 제출한 과제입니다. 제출 기간이 끝나 글을 고칠 수 없습니다.");
+      return;
+    }
+
+    if (!isSubmittable(assignment)) {
+      showStateMessage("제출 기간이 아닙니다. 과제 화면에서 기간을 확인해주세요.");
       return;
     }
 
@@ -129,11 +168,13 @@ async function loadAssignment() {
   }
 }
 
-function renderForm() {
+function renderForm({ submission = null, detail = null } = {}) {
   const status = getAssignmentStatus(assignment);
   const title = assignment.title ?? "제목 없음";
+  const kind = isEditMode ? "제출글 수정" : "과제제출";
 
-  document.title = `${title} 과제제출 | 동아리 통합 인프라`;
+  document.title = `${title} ${kind} | 동아리 통합 인프라`;
+  if (headingKind) headingKind.textContent = kind;
   assignmentTitleTag.textContent = title;
 
   statusBadge.className = `board-badge is-${status}`;
@@ -141,133 +182,36 @@ function renderForm() {
 
   periodText.textContent =
     `제출기간 : ${formatDateTime(assignment.startAt)} ~ ${formatDateTime(assignment.dueAt)}`;
-  remainingText.textContent = describeRemaining(assignment);
+  remainingText.textContent = isEditMode && !isSubmittable(assignment)
+    ? "마감 후 수정이 허용된 과제입니다."
+    : describeRemaining(assignment);
 
-  authorNameInput.value = getDisplayName(currentProfile, currentUser);
-  studentIdInput.value = currentProfile?.studentId || "학번 미등록";
+  if (isEditMode) {
+    authorNameInput.value = submission?.authorName || getDisplayName(currentProfile, currentUser);
+    studentIdInput.value = submission?.studentId || currentProfile?.studentId || "학번 미등록";
+    titleInput.value = submission?.title ?? "";
+    contentInput.value = detail?.content ?? "";
+    contentCount.textContent = String(contentInput.value.length);
 
-  for (let index = 0; index < INITIAL_ATTACHMENT_ROWS; index += 1) {
-    addAttachmentRow();
+    originalAttachments = Array.isArray(detail?.attachments) ? detail.attachments : [];
+    attachmentPicker.reset(originalAttachments);
+
+    saveButton.textContent = "수정 저장";
+    cancelLink.href = submissionUrl();
+    backLink.href = submissionUrl();
+    backLink.textContent = "← 제출글로 돌아가기";
+  } else {
+    authorNameInput.value = getDisplayName(currentProfile, currentUser);
+    studentIdInput.value = currentProfile?.studentId || "학번 미등록";
+
+    attachmentPicker.reset([]);
+    for (let index = 0; index < INITIAL_ATTACHMENT_ROWS; index += 1) {
+      attachmentPicker.addRow();
+    }
   }
 
   form.hidden = false;
   stateMessage.hidden = true;
-}
-
-// ========================================
-// 첨부 칸
-// ========================================
-
-function addAttachmentRow() {
-  const rows = attachmentList.children.length;
-
-  if (rows >= MAX_FILE_COUNT) {
-    message.textContent = `첨부는 ${MAX_FILE_COUNT}개까지 올릴 수 있습니다.`;
-    return;
-  }
-
-  const item = document.createElement("li");
-  item.className = "board-attach-row";
-
-  const label = document.createElement("span");
-  label.className = "board-attach-label";
-  label.textContent = `첨부${rows + 1}`;
-
-  // 파일 상자 전체가 누르는 자리다. 진짜 입력칸은 상자 안에 숨겨 둔다.
-  const box = document.createElement("label");
-  box.className = "board-attach-box";
-
-  const input = document.createElement("input");
-  input.type = "file";
-  input.className = "board-attach-input";
-  input.setAttribute("aria-label", `첨부파일 ${rows + 1}`);
-
-  const choose = document.createElement("span");
-  choose.className = "board-attach-choose";
-  choose.textContent = "파일 선택";
-
-  const name = document.createElement("span");
-  name.className = "board-attach-name";
-  name.textContent = "선택된 파일 없음";
-
-  const size = document.createElement("span");
-  size.className = "board-attach-size";
-
-  const clearButton = document.createElement("button");
-  clearButton.type = "button";
-  clearButton.className = "board-attach-clear";
-  clearButton.textContent = "×";
-  clearButton.hidden = true;
-  clearButton.setAttribute("aria-label", `첨부파일 ${rows + 1} 지우기`);
-
-  function showChosenFile() {
-    const file = input.files?.[0];
-
-    if (!file) {
-      box.classList.remove("is-filled");
-      name.textContent = "선택된 파일 없음";
-      size.textContent = "";
-      clearButton.hidden = true;
-      return;
-    }
-
-    if (file.size > MAX_FILE_BYTES) {
-      message.textContent =
-        `'${file.name}' 은 ${formatFileSize(MAX_FILE_BYTES)} 를 넘습니다. 더 작은 파일을 올려주세요.`;
-      input.value = "";
-      showChosenFile();
-      return;
-    }
-
-    message.textContent = "";
-    box.classList.remove("is-dragging");
-    box.classList.add("is-filled");
-    name.textContent = file.name;
-    size.textContent = formatFileSize(file.size);
-    clearButton.hidden = false;
-  }
-
-  input.addEventListener("change", showChosenFile);
-
-  clearButton.addEventListener("click", () => {
-    input.value = "";
-    showChosenFile();
-  });
-
-  // 상자에 파일을 끌어다 놓아도 된다.
-  box.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    box.classList.add("is-dragging");
-  });
-
-  box.addEventListener("dragleave", () => box.classList.remove("is-dragging"));
-
-  box.addEventListener("drop", (event) => {
-    event.preventDefault();
-    box.classList.remove("is-dragging");
-
-    const dropped = event.dataTransfer?.files?.[0];
-    if (!dropped) return;
-
-    const transfer = new DataTransfer();
-    transfer.items.add(dropped);
-    input.files = transfer.files;
-    showChosenFile();
-  });
-
-  box.append(input, choose, name, size);
-  item.append(label, box, clearButton);
-  attachmentList.appendChild(item);
-
-  addAttachmentButton.hidden = attachmentList.children.length >= MAX_FILE_COUNT;
-}
-
-addAttachmentButton.addEventListener("click", addAttachmentRow);
-
-function readChosenFiles() {
-  return [...attachmentList.querySelectorAll(".board-attach-input")]
-    .map((input) => input.files?.[0])
-    .filter(Boolean);
 }
 
 // ========================================
@@ -293,17 +237,18 @@ form.addEventListener("submit", async (event) => {
   }
 
   // 화면을 열어둔 사이에 마감됐을 수 있어 저장 직전에 한 번 더 본다.
-  if (!isSubmittable(assignment)) {
-    message.textContent = "제출 기간이 지났습니다.";
+  if (isEditMode ? !isSubmissionEditable(assignment) : !isSubmittable(assignment)) {
+    message.textContent = isEditMode
+      ? "제출 기간이 끝나 글을 고칠 수 없습니다."
+      : "제출 기간이 지났습니다.";
     return;
   }
 
-  const files = readChosenFiles();
-  const oversized = findOversizedFile(files);
+  const { kept, removed, files } = attachmentPicker.read(originalAttachments);
+  const fileProblem = validateAttachmentFiles(files, kept.length);
 
-  if (oversized) {
-    message.textContent =
-      `'${oversized.name}' 은 ${formatFileSize(MAX_FILE_BYTES)} 를 넘습니다.`;
+  if (fileProblem) {
+    message.textContent = fileProblem;
     return;
   }
 
@@ -327,6 +272,22 @@ form.addEventListener("submit", async (event) => {
       })
       : [];
 
+    if (isEditMode) {
+      message.textContent = "고친 내용을 저장하는 중...";
+
+      await updateSubmission(assignmentId, {
+        title: titleInput.value,
+        content: contentInput.value,
+        attachments: [...kept, ...uploaded]
+      });
+
+      // 저장이 끝난 뒤에야 해제한 파일을 저장소에서 지운다. (저장이 실패하면 그대로 남는다)
+      await removeAttachments(removed);
+
+      window.location.replace(submissionUrl());
+      return;
+    }
+
     message.textContent = "제출하는 중...";
 
     await createSubmission(assignmentId, {
@@ -339,24 +300,25 @@ form.addEventListener("submit", async (event) => {
 
     window.location.replace(assignmentUrl);
   } catch (error) {
-    console.error("과제 제출 오류:", error);
+    console.error(isEditMode ? "제출글 수정 오류:" : "과제 제출 오류:", error);
 
-    // 저장에 실패했으면 이미 올라간 첨부파일은 지워서 찌꺼기를 남기지 않는다.
+    // 저장에 실패했으면 이번에 올린 첨부파일은 지워서 찌꺼기를 남기지 않는다.
     await removeAttachments(uploaded);
 
     message.textContent = describeSubmitError(error);
     isSaving = false;
     saveButton.disabled = false;
-    saveButton.textContent = "저장";
+    saveButton.textContent = isEditMode ? "수정 저장" : "저장";
   }
 });
 
 // 왜 실패했는지 화면에서 바로 알 수 있게 풀어 쓴다.
 function describeSubmitError(error) {
   const code = String(error?.code ?? "");
+  const action = isEditMode ? "수정" : "제출";
 
   if (code === "permission-denied") {
-    return "제출 권한이 없습니다. 제출 기간과 로그인 상태를 확인해주세요."
+    return `${action} 권한이 없습니다. 제출 기간과 로그인 상태를 확인해주세요.`
       + " (보안 규칙이 아직 반영되지 않았을 수도 있습니다)";
   }
 
@@ -373,8 +335,8 @@ function describeSubmitError(error) {
   }
 
   return code
-    ? `제출하지 못했습니다. (${code})`
-    : "제출하지 못했습니다. 잠시 후 다시 시도해주세요.";
+    ? `${action}하지 못했습니다. (${code})`
+    : `${action}하지 못했습니다. 잠시 후 다시 시도해주세요.`;
 }
 
 function showStateMessage(text) {

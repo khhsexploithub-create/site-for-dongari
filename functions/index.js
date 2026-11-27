@@ -7,14 +7,17 @@
 //  행사 홍보 올라옴        → 행사운영 소위원회
 //  자원 예약 승인 · 반려   → 예약한 사람
 //
+//  자원 예약 자동승인 (1분마다) — 자동승인 항목 신청을 접수 시각 + 5분에 승인으로 바꾼다.
+//
 // 받는 기기 목록은 users/{uid}/fcmTokens 에 있다. (src/push/pushService.js 가 저장)
 // 배포: 프로젝트 폴더에서  npx firebase-tools deploy --only functions
 
 import { setGlobalOptions } from "firebase-functions/v2";
 import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 import { logger } from "firebase-functions";
 import { initializeApp } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 
 initializeApp();
@@ -164,6 +167,45 @@ export const pushOnReservationReview = onDocumentUpdated("resourceReservations/{
     tag: `reservation-${event.params.reservationId}`
   });
 });
+
+// ========================================
+// 자원 예약 자동승인 (접수 시각 + 5분)
+// ========================================
+// 예약 화면 · 관리자 화면을 연 브라우저도 같은 일을 하지만(src/resources/autoApproval.js),
+// 아무도 화면을 열지 않아도 제때 승인되도록 1분마다 확인한다.
+// 승인으로 바뀌면 위 pushOnReservationReview 가 신청자에게 알림을 보낸다.
+
+const AUTO_APPROVAL_DELAY_MS = 5 * 60 * 1000;
+
+export const autoApproveReservations = onSchedule(
+  { schedule: "every 1 minutes", timeZone: "Asia/Seoul" },
+  async () => {
+    const snapshot = await db.collection("resourceReservations")
+      .where("autoApproveScheduled", "==", true)
+      .where("status", "==", "pending")
+      .get();
+
+    const now = Date.now();
+    const due = snapshot.docs.filter((reservationDoc) => {
+      const createdAt = reservationDoc.get("createdAt");
+      return createdAt && createdAt.toMillis() + AUTO_APPROVAL_DELAY_MS <= now;
+    });
+
+    await Promise.all(due.map((reservationDoc) => db.runTransaction(async (transaction) => {
+      // 그 사이 소위원장이 처리했거나 브라우저가 먼저 승인했으면 건드리지 않는다.
+      const latest = await transaction.get(reservationDoc.ref);
+      if (latest.get("status") !== "pending") return;
+
+      transaction.update(reservationDoc.ref, {
+        status: "approved",
+        autoApproved: true,
+        reviewedAt: FieldValue.serverTimestamp()
+      });
+    })));
+
+    if (due.length > 0) logger.info(`자동승인 ${due.length}건`);
+  }
+);
 
 // ========================================
 // 발송
